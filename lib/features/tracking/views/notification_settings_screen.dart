@@ -36,9 +36,15 @@ class _NotificationSettingsScreenState
   }
 
   Future<void> _initialize() async {
-    final status = kIsWeb
-        ? NotifPermissionStatus.unsupported
-        : await NotificationService.getPermissionStatus();
+    final NotifPermissionStatus status;
+    if (kIsWeb) {
+      status = NotifPermissionStatus.unsupported;
+    } else {
+      final enabled = await NotificationService.areNotificationsEnabled();
+      status = enabled
+          ? NotifPermissionStatus.granted
+          : await NotificationService.getPermissionStatus();
+    }
     final settings = await NotificationService.loadSettings();
 
     if (!mounted) return;
@@ -53,11 +59,14 @@ class _NotificationSettingsScreenState
     });
   }
 
-  /// Request permission; updates banner. Shows OS dialog on first ask,
-  /// routes to Settings if permanently denied.
+  /// Request permission; updates banner. Uses areNotificationsEnabled() for MIUI/Android < 13.
   Future<bool> _askPermission() async {
     if (kIsWeb) return false;
-    final result = await NotificationService.requestPermission();
+    var result = await NotificationService.requestPermission();
+    final enabled = await NotificationService.areNotificationsEnabled();
+    if (enabled) {
+      result = NotifPermissionStatus.granted;
+    }
     if (!mounted) return false;
     setState(() => _permStatus = result);
 
@@ -304,7 +313,7 @@ class _NotificationSettingsScreenState
                         onTest: () async {
                           final result =
                               await NotificationService.showHydrationReminder();
-                          _handleTestResult(result, 'hidrasi');
+                          await _handleTestResult(result, 'hidrasi');
                         },
                       ),
                     ],
@@ -371,7 +380,7 @@ class _NotificationSettingsScreenState
                         onTest: () async {
                           final result =
                               await NotificationService.showRunReminder();
-                          _handleTestResult(result, 'aktivitas');
+                          await _handleTestResult(result, 'aktivitas');
                         },
                       ),
                     ],
@@ -400,20 +409,31 @@ class _NotificationSettingsScreenState
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
-  void _handleTestResult(NotifPermissionStatus result, String type) {
+  Future<void> _handleTestResult(NotifSendResult result, String type) async {
+    final enabled = kIsWeb
+        ? false
+        : await NotificationService.areNotificationsEnabled();
     if (!mounted) return;
-    switch (result) {
-      case NotifPermissionStatus.granted:
-        _showSnack('✅ Notifikasi $type berhasil dikirim!');
-        setState(() => _permStatus = NotifPermissionStatus.granted);
-      case NotifPermissionStatus.permanentlyDenied:
-        setState(() => _permStatus = NotifPermissionStatus.permanentlyDenied);
-        _showPermanentlyDeniedDialog();
-      case NotifPermissionStatus.denied:
-        setState(() => _permStatus = NotifPermissionStatus.denied);
-        _showSnack('❌ Izin notifikasi ditolak.');
-      case NotifPermissionStatus.unsupported:
-        _showWebUnsupportedSnack();
+
+    final updatedStatus = enabled
+        ? NotifPermissionStatus.granted
+        : result.permissionStatus;
+    setState(() => _permStatus = updatedStatus);
+
+    if (result.sent) {
+      _showSnack('✅ Notifikasi $type berhasil dikirim!');
+      return;
+    }
+
+    if (result.permissionStatus == NotifPermissionStatus.unsupported) {
+      _showWebUnsupportedSnack();
+      return;
+    }
+
+    final detail = result.errorMessage ?? 'Izin notifikasi ditolak.';
+    _showSnack('❌ Gagal mengirim notifikasi $type: $detail');
+    if (result.permissionStatus == NotifPermissionStatus.permanentlyDenied) {
+      _showPermanentlyDeniedDialog();
     }
   }
 

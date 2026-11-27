@@ -5,7 +5,6 @@ import 'package:geezus/features/auth/views/login_screen.dart';
 import 'converters_screen.dart';
 import 'saran_kesan_screen.dart';
 import '../../tracking/views/notification_settings_screen.dart';
-import '../../tracking/views/step_counter_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -162,16 +161,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   onTap: () => Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const NotificationSettingsScreen()),
-                  ),
-                ),
-                _buildMenuTile(
-                  icon: Icons.directions_walk,
-                  iconColor: Colors.greenAccent,
-                  title: 'Sensor & Step Counter',
-                  subtitle: 'Hitung langkah harian dengan sensor',
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const StepCounterScreen()),
                   ),
                 ),
               ],

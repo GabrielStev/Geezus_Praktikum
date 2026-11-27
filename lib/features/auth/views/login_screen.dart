@@ -188,7 +188,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ),
               const Text(
-                'Gamified Fitness & Web3 Experience',
+                'Gamified Fitness Experience',
                 style: TextStyle(color: Colors.grey, fontSize: 12),
               ),
               const SizedBox(height: 48),

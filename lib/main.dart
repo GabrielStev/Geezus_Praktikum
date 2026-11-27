@@ -1,39 +1,85 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'core/utils/notification_service.dart';
-import 'shared/root_navigation.dart';
-import 'features/auth/views/login_screen.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'core/utils/notification_service.dart';
+import 'features/auth/views/login_screen.dart';
+import 'features/badges/controllers/badge_controller.dart';
+import 'features/badges/models/badge_model.dart';
+import 'shared/root_navigation.dart';
+
+/// Flag global status inisialisasi Supabase agar aman saat offline/tanpa .env.
+bool isSupabaseReady = false;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Load .env — try real .env first, then .env.example as fallback
+  // 1. Load .env (coba .env lalu fallback .env.example)
+  debugPrint('[INIT] 1. Dotenv');
   try {
-    await dotenv.load(fileName: '.env');
+    await dotenv.load(fileName: '.env').timeout(const Duration(seconds: 3));
   } catch (_) {
     try {
-      await dotenv.load(fileName: '.env.example');
-    } catch (e) {
-      debugPrint('⚠️ Could not load any .env file: $e');
+      await dotenv
+          .load(fileName: '.env.example')
+          .timeout(const Duration(seconds: 3));
+    } catch (e, st) {
+      debugPrint('[INIT] Dotenv skip/error: $e\n$st');
     }
   }
 
-  // Initialize Supabase (URL/key from .env if available, else hardcoded fallback)
-  final supabaseUrl = dotenv.env['SUPABASE_URL']?.isNotEmpty == true
-      ? dotenv.env['SUPABASE_URL']!
-      : 'https://ubzviqaxylkmabsscite.supabase.co';
-  final supabaseAnonKey = dotenv.env['SUPABASE_ANON_KEY']?.isNotEmpty == true
-      ? dotenv.env['SUPABASE_ANON_KEY']!
-      : 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVienZpcWF4eWxrbWFic3NjaXRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIyMzY2MDgsImV4cCI6MjEwNzgxMjYwOH0.Nr47rr0qtYtrNUnGGfGiIcHJZ_MfxntnZHvI93vu5mI';
+  // 2. Initialize Hive & register TypeAdapter
+  debugPrint('[INIT] 2. Hive');
+  try {
+    await Hive.initFlutter().timeout(const Duration(seconds: 3));
+    if (!Hive.isAdapterRegistered(0)) {
+      Hive.registerAdapter(BadgeModelAdapter());
+    }
+    await BadgeController.instance.init().timeout(const Duration(seconds: 3));
+  } catch (e, st) {
+    debugPrint('[INIT] Hive init error: $e\n$st');
+  }
 
-  // ignore: deprecated_member_use
-  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  // 3. Initialize Supabase hanya jika URL valid & Anon Key terisi
+  debugPrint('[INIT] 3. Supabase');
+  isSupabaseReady = false;
+  try {
+    final supabaseUrl = dotenv.env['SUPABASE_URL']?.trim() ?? '';
+    final supabaseAnonKey = dotenv.env['SUPABASE_ANON_KEY']?.trim() ?? '';
+    final uri = Uri.tryParse(supabaseUrl);
+    final isValidUrl = uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        uri.host.isNotEmpty;
 
-  // Initialize notification service (skips on Web automatically)
-  await NotificationService.initNotification();
+    if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty && isValidUrl) {
+      // ignore: deprecated_member_use
+      await Supabase.initialize(
+        url: supabaseUrl,
+        anonKey: supabaseAnonKey,
+      ).timeout(const Duration(seconds: 3));
+      isSupabaseReady = true;
+    } else {
+      debugPrint(
+        '[INIT] Supabase dilewati: URL/Key kosong atau tidak valid (mode lokal aktif).',
+      );
+    }
+  } catch (e, st) {
+    isSupabaseReady = false;
+    debugPrint('[INIT] Supabase init error: $e\n$st');
+  }
 
+  // 4. Initialize notification service dengan timeout agar tidak memblokir runApp
+  debugPrint('[INIT] 4. Notification');
+  try {
+    await NotificationService.initNotification()
+        .timeout(const Duration(seconds: 3));
+  } catch (e, st) {
+    debugPrint('[INIT] Notification init error/timeout: $e\n$st');
+  }
+
+  // 5. Jalankan aplikasi
+  debugPrint('[INIT] 5. runApp');
   runApp(const GeezusApp());
 }
 
@@ -59,7 +105,7 @@ class GeezusApp extends StatelessWidget {
   }
 }
 
-/// Routes to Login or Home based on existing session
+/// Mengecek sesi pengguna lalu mengarahkan ke RootNavigation atau LoginScreen.
 class _StartupRouter extends StatefulWidget {
   const _StartupRouter();
 
@@ -68,9 +114,6 @@ class _StartupRouter extends StatefulWidget {
 }
 
 class _StartupRouterState extends State<_StartupRouter> {
-  bool _isChecking = true;
-  bool _isLoggedIn = false;
-
   @override
   void initState() {
     super.initState();
@@ -80,61 +123,75 @@ class _StartupRouterState extends State<_StartupRouter> {
   Future<void> _checkSession() async {
     bool loggedIn = false;
 
-    // 1. Check Supabase session first
     try {
-      final session = Supabase.instance.client.auth.currentSession;
-      if (session != null) {
-        loggedIn = true;
-      }
-    } catch (_) {}
+      // Pastikan frame pertama selesai dirender sebelum Navigator.pushReplacement
+      await Future<void>.delayed(const Duration(milliseconds: 50));
 
-    // 2. Fall back to local session in secure storage
-    if (!loggedIn) {
-      try {
-        const storage = FlutterSecureStorage();
-        final activeEmail = await storage.read(key: 'active_email');
-        if (activeEmail != null && activeEmail.isNotEmpty) {
-          loggedIn = true;
+      // 1. Cek sesi Supabase hanya jika Supabase berhasil diinisialisasi
+      if (isSupabaseReady) {
+        try {
+          final session = Supabase.instance.client.auth.currentSession;
+          if (session != null) {
+            loggedIn = true;
+          }
+        } catch (e) {
+          debugPrint('[STARTUP] Cek sesi Supabase gagal: $e');
         }
-      } catch (_) {}
-    }
+      }
 
-    if (mounted) {
-      setState(() {
-        _isLoggedIn = loggedIn;
-        _isChecking = false;
-      });
+      // 2. Fallback ke sesi lokal di FlutterSecureStorage
+      if (!loggedIn) {
+        try {
+          const storage = FlutterSecureStorage();
+          final activeEmail = await storage
+              .read(key: 'active_email')
+              .timeout(const Duration(seconds: 3));
+          if (activeEmail != null && activeEmail.isNotEmpty) {
+            loggedIn = true;
+          }
+        } catch (e) {
+          debugPrint('[STARTUP] Cek sesi lokal gagal: $e');
+        }
+      }
+    } catch (e, st) {
+      debugPrint('[STARTUP] Error tidak terduga di _checkSession: $e\n$st');
+    } finally {
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) =>
+                loggedIn ? const RootNavigation() : const LoginScreen(),
+          ),
+        );
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isChecking) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF121212),
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.flash_on, size: 70, color: Color(0xFF6C5CE7)),
-              SizedBox(height: 20),
-              CircularProgressIndicator(color: Color(0xFF6C5CE7)),
-              SizedBox(height: 16),
-              Text(
-                'GEEZUS',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 2,
-                ),
+    return const Scaffold(
+      backgroundColor: Color(0xFF121212),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.flash_on, size: 70, color: Color(0xFF6C5CE7)),
+            SizedBox(height: 20),
+            CircularProgressIndicator(color: Color(0xFF6C5CE7)),
+            SizedBox(height: 16),
+            Text(
+              'Memuat Geezus...',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
               ),
-            ],
-          ),
+            ),
+          ],
         ),
-      );
-    }
-
-    return _isLoggedIn ? const RootNavigation() : const LoginScreen();
+      ),
+    );
   }
 }

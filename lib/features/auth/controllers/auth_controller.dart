@@ -3,21 +3,30 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../main.dart' show isSupabaseReady;
 
 class AuthController extends ChangeNotifier {
   static final AuthController instance = AuthController._internal();
   AuthController._internal();
 
-  final _supabase = Supabase.instance.client;
   final _storage = const FlutterSecureStorage();
+
+  SupabaseClient? get _supabase {
+    if (!isSupabaseReady) return null;
+    try {
+      return Supabase.instance.client;
+    } catch (_) {
+      return null;
+    }
+  }
 
   bool _isLoading = false;
   String? _errorMessage;
 
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
-  User? get currentUser => _supabase.auth.currentUser;
-  bool get isAuthenticated => _supabase.auth.currentSession != null;
+  User? get currentUser => _supabase?.auth.currentUser;
+  bool get isAuthenticated => _supabase?.auth.currentSession != null;
 
   /// Registrasi akun baru ke Supabase & sinkronisasi ke tabel profiles
   /// Langsung memanggil signOut() agar tidak meninggalkan session yang terkunci
@@ -49,32 +58,36 @@ class AuthController extends ChangeNotifier {
       await _storage.delete(key: 'active_username');
 
       // 2. Registrasi ke Supabase Auth
-      try {
-        final response = await _supabase.auth.signUp(
-          email: email,
-          password: password,
-        );
+      final supabase = _supabase;
+      if (supabase != null) {
+        try {
+          final response = await supabase.auth.signUp(
+            email: email,
+            password: password,
+          );
 
-        if (response.user != null) {
-          // Sinkronisasi profil ke tabel 'profiles'
-          try {
-            await _supabase.from('profiles').upsert({
-              'id': response.user!.id,
-              'email': email,
-              'username': username.isNotEmpty ? username : email.split('@').first,
-              'level': 1,
-              'total_xp': 0,
-              'boss_damage_total': 0,
-            });
-          } catch (e) {
-            debugPrint('Warning: gagal upsert profile ke Supabase: $e');
+          if (response.user != null) {
+            // Sinkronisasi profil ke tabel 'profiles'
+            try {
+              await supabase.from('profiles').upsert({
+                'id': response.user!.id,
+                'email': email,
+                'username':
+                    username.isNotEmpty ? username : email.split('@').first,
+                'level': 1,
+                'total_xp': 0,
+                'boss_damage_total': 0,
+              });
+            } catch (e) {
+              debugPrint('Warning: gagal upsert profile ke Supabase: $e');
+            }
+
+            // Wajib panggil signOut agar sesi ter-reset bersih sebelum diarahkan ke login
+            await supabase.auth.signOut();
           }
-
-          // Wajib panggil signOut agar sesi ter-reset bersih sebelum diarahkan ke login
-          await _supabase.auth.signOut();
+        } catch (e) {
+          debugPrint('Supabase signup exception: $e');
         }
-      } catch (e) {
-        debugPrint('Supabase signup exception: $e');
       }
 
       return true;
@@ -107,9 +120,10 @@ class AuthController extends ChangeNotifier {
 
       // Coba sign in ke Supabase jika targetEmail berbentuk email
       bool supabaseSuccess = false;
-      if (targetEmail.contains('@')) {
+      final supabase = _supabase;
+      if (supabase != null && targetEmail.contains('@')) {
         try {
-          final res = await _supabase.auth.signInWithPassword(
+          final res = await supabase.auth.signInWithPassword(
             email: targetEmail,
             password: password,
           );
@@ -149,7 +163,7 @@ class AuthController extends ChangeNotifier {
   /// Logout bersih: membersihkan sesi Supabase dan cache lokal
   Future<void> signOut() async {
     try {
-      await _supabase.auth.signOut();
+      await _supabase?.auth.signOut();
     } catch (e) {
       debugPrint('Supabase signOut error: $e');
     }

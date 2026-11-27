@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../features/workouts/views/workout_log_screen.dart';
 import '../features/boss_battle/views/boss_battle_screen.dart';
-import '../features/web3_nft/views/badges_screen.dart';
+import '../features/badges/views/badges_screen.dart';
 import '../features/auth/views/profile_screen.dart';
 
 class RootNavigation extends StatefulWidget {

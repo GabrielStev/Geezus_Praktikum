@@ -104,21 +104,32 @@ class GymStore extends ChangeNotifier {
 
   /// Add a gym log entry and persist it to SQLite immediately.
   Future<void> addLog(String name, double weight, int sets, int reps) async {
-    final log = GymLog(
+    final now = DateTime.now();
+    int? insertedId;
+    final draft = GymLog(
       name: name,
       weight: weight,
       sets: sets,
       reps: reps,
-      date: DateTime.now(),
+      date: now,
     );
-    _logs.add(log);
-    notifyListeners();
 
     try {
-      await SqliteHelper.instance.insertGymLog(log.toMap());
+      insertedId = await SqliteHelper.instance.insertGymLog(draft.toMap());
     } catch (e) {
       debugPrint('GymStore.addLog persist error: $e');
     }
+
+    final savedLog = GymLog(
+      id: insertedId,
+      name: name,
+      weight: weight,
+      sets: sets,
+      reps: reps,
+      date: now,
+    );
+    _logs.insert(0, savedLog);
+    notifyListeners();
   }
 
   /// Force a full reload from SQLite (e.g., after clearing data).

@@ -1,4 +1,3 @@
-// ignore_for_file: avoid_dynamic_calls
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -17,17 +16,6 @@ const _kRunNotifId = 101;
 const _kHydrationTestId = 300;
 const _kRunTestId = 301;
 
-// Single lazy instance stored as `dynamic` to bypass web stub type conflicts.
-// All NotificationService methods share this same instance so that
-// initialize() and show()/periodicallyShow() operate on the same object.
-dynamic _sharedPlugin;
-
-dynamic _plugin() {
-  if (kIsWeb) return null;
-  _sharedPlugin ??= FlutterLocalNotificationsPlugin();
-  return _sharedPlugin;
-}
-
 /// Result of a permission check/request.
 enum NotifPermissionStatus {
   /// Permission granted — can send notification.
@@ -43,19 +31,45 @@ enum NotifPermissionStatus {
   unsupported,
 }
 
+/// Hasil eksekusi pengiriman notifikasi langsung (untuk tombol Tes).
+class NotifSendResult {
+  final bool sent;
+  final NotifPermissionStatus permissionStatus;
+  final String? errorMessage;
+
+  const NotifSendResult({
+    required this.sent,
+    required this.permissionStatus,
+    this.errorMessage,
+  });
+}
+
 class NotificationService {
+  static final FlutterLocalNotificationsPlugin _plugin =
+      FlutterLocalNotificationsPlugin();
+  static bool _isInitialized = false;
+  static Future<void>? _initFuture;
+
   // ---------------------------------------------------------------------------
-  // Initialization
+  // Initialization (including lazy initialization)
   // ---------------------------------------------------------------------------
 
-  static Future<void> initNotification() async {
-    if (kIsWeb) {
-      debugPrint('NotificationService: skipped on Web platform.');
+  static Future<void> _ensureInitialized() async {
+    if (kIsWeb || _isInitialized) return;
+    if (_initFuture != null) {
+      await _initFuture;
       return;
     }
-    final p = _plugin();
-    if (p == null) return;
 
+    _initFuture = _performInitialize();
+    try {
+      await _initFuture;
+    } finally {
+      _initFuture = null;
+    }
+  }
+
+  static Future<void> _performInitialize() async {
     try {
       const androidSettings =
           AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -69,16 +83,13 @@ class NotificationService {
         iOS: iosSettings,
       );
 
-      await p.initialize(
-        initSettings,
+      await _plugin.initialize(
+        settings: initSettings,
         onDidReceiveNotificationResponse: _onNotificationResponse,
       );
 
-      // Create Android notification channels with MAX importance for heads-up
-      final typed = p as FlutterLocalNotificationsPlugin;
-      final androidPlugin = typed
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>();
+      final androidPlugin = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
       if (androidPlugin != null) {
         await androidPlugin.createNotificationChannel(
           const AndroidNotificationChannel(
@@ -104,10 +115,23 @@ class NotificationService {
         );
       }
 
+      _isInitialized = true;
+    } catch (e) {
+      debugPrint('NotificationService _performInitialize error: $e');
+    }
+  }
+
+  static Future<void> initNotification() async {
+    if (kIsWeb) {
+      debugPrint('NotificationService: skipped on Web platform.');
+      return;
+    }
+    await _ensureInitialized();
+    try {
       // Restore previously scheduled notifications after app restart
       await _restoreScheduledNotifications();
     } catch (e) {
-      debugPrint('NotificationService init error: $e');
+      debugPrint('NotificationService restore error: $e');
     }
   }
 
@@ -116,13 +140,43 @@ class NotificationService {
   }
 
   // ---------------------------------------------------------------------------
-  // Permission Handling — uses permission_handler for reliable Android support
+  // Permission Handling — Android plugin + permission_handler (MIUI-safe)
   // ---------------------------------------------------------------------------
+
+  /// Cek apakah notifikasi aktif di sistem Android (termasuk MIUI & Android < 13).
+  static Future<bool> areNotificationsEnabled() async {
+    if (kIsWeb) return false;
+    await _ensureInitialized();
+
+    try {
+      final androidPlugin = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      final pluginEnabled = await androidPlugin?.areNotificationsEnabled();
+      if (pluginEnabled == true) {
+        return true;
+      }
+    } catch (e) {
+      debugPrint('areNotificationsEnabled (androidPlugin) error: $e');
+    }
+
+    try {
+      if (await Permission.notification.isGranted) {
+        return true;
+      }
+    } catch (e) {
+      debugPrint('areNotificationsEnabled (permission_handler) error: $e');
+    }
+
+    return false;
+  }
 
   /// Check current notification permission status.
   static Future<NotifPermissionStatus> getPermissionStatus() async {
     if (kIsWeb) return NotifPermissionStatus.unsupported;
     try {
+      if (await areNotificationsEnabled()) {
+        return NotifPermissionStatus.granted;
+      }
       final status = await Permission.notification.status;
       if (status.isGranted) return NotifPermissionStatus.granted;
       if (status.isPermanentlyDenied) {
@@ -135,28 +189,47 @@ class NotificationService {
     }
   }
 
-  /// Request notification permission.
-  /// Returns the resulting [NotifPermissionStatus].
+  /// Request notification permission (tidak mensyaratkan exact alarm).
   static Future<NotifPermissionStatus> requestPermission() async {
     if (kIsWeb) return NotifPermissionStatus.unsupported;
+    await _ensureInitialized();
+
     try {
+      if (await areNotificationsEnabled()) {
+        return NotifPermissionStatus.granted;
+      }
+
+      final androidPlugin = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      final pluginGranted =
+          await androidPlugin?.requestNotificationsPermission();
+      if (pluginGranted == true || await areNotificationsEnabled()) {
+        return NotifPermissionStatus.granted;
+      }
+
       final current = await Permission.notification.status;
       if (current.isGranted) {
-        debugPrint('Notification permission: already granted');
         return NotifPermissionStatus.granted;
       }
       if (current.isPermanentlyDenied) {
-        debugPrint('Notification permission: permanently denied — open settings');
         return NotifPermissionStatus.permanentlyDenied;
       }
-      // Request the permission — shows OS dialog
+
       final result = await Permission.notification.request();
       debugPrint('Notification permission request result: $result');
-      if (result.isGranted) return NotifPermissionStatus.granted;
-      if (result.isPermanentlyDenied) return NotifPermissionStatus.permanentlyDenied;
+
+      if (result.isGranted || await areNotificationsEnabled()) {
+        return NotifPermissionStatus.granted;
+      }
+      if (result.isPermanentlyDenied) {
+        return NotifPermissionStatus.permanentlyDenied;
+      }
       return NotifPermissionStatus.denied;
     } catch (e) {
       debugPrint('requestPermission error: $e');
+      if (await areNotificationsEnabled()) {
+        return NotifPermissionStatus.granted;
+      }
       return NotifPermissionStatus.denied;
     }
   }
@@ -169,8 +242,7 @@ class NotificationService {
   /// Simple bool check — true if permission is currently granted.
   static Future<bool> checkPermission() async {
     if (kIsWeb) return false;
-    final status = await getPermissionStatus();
-    return status == NotifPermissionStatus.granted;
+    return areNotificationsEnabled();
   }
 
   // ---------------------------------------------------------------------------
@@ -180,20 +252,19 @@ class NotificationService {
   /// Schedule hourly hydration reminder. Cancels any existing one first.
   static Future<void> scheduleHydrationReminder(int intervalHours) async {
     if (kIsWeb) return;
-    final p = _plugin();
-    if (p == null) return;
+    await _ensureInitialized();
     await cancelHydrationReminder();
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kHydrationEnabled, true);
       await prefs.setInt(_kHydrationIntervalHours, intervalHours);
 
-      await p.periodicallyShow(
-        _kHydrationNotifId,
-        '💧 Waktunya Minum Air!',
-        'Jaga hidrasi tubuhmu. Minum 1-2 gelas air sekarang.',
-        RepeatInterval.hourly,
-        _buildNotifDetails(
+      await _plugin.periodicallyShow(
+        id: _kHydrationNotifId,
+        title: '💧 Waktunya Minum Air!',
+        body: 'Jaga hidrasi tubuhmu. Minum 1-2 gelas air sekarang.',
+        repeatInterval: RepeatInterval.hourly,
+        notificationDetails: _buildNotifDetails(
           channelId: 'hydration_channel',
           channelName: 'Pengingat Hidrasi',
           body: 'Jaga hidrasi tubuhmu. Minum 1-2 gelas air sekarang.',
@@ -210,10 +281,9 @@ class NotificationService {
   /// Cancel hydration reminder and persist OFF state.
   static Future<void> cancelHydrationReminder() async {
     if (kIsWeb) return;
-    final p = _plugin();
-    if (p == null) return;
+    await _ensureInitialized();
     try {
-      await p.cancel(_kHydrationNotifId);
+      await _plugin.cancel(id: _kHydrationNotifId);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kHydrationEnabled, false);
     } catch (e) {
@@ -228,8 +298,7 @@ class NotificationService {
   /// Schedule daily run reminder.
   static Future<void> scheduleRunReminder(int hour, int minute) async {
     if (kIsWeb) return;
-    final p = _plugin();
-    if (p == null) return;
+    await _ensureInitialized();
     await cancelRunReminder();
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -237,12 +306,12 @@ class NotificationService {
       await prefs.setInt(_kRunHour, hour);
       await prefs.setInt(_kRunMinute, minute);
 
-      await p.periodicallyShow(
-        _kRunNotifId,
-        '🏋️ Siap Beraktivitas Hari Ini?',
-        'Catat latihanmu dan lanjutkan progres Boss Battle.',
-        RepeatInterval.daily,
-        _buildNotifDetails(
+      await _plugin.periodicallyShow(
+        id: _kRunNotifId,
+        title: '🏋️ Siap Beraktivitas Hari Ini?',
+        body: 'Catat latihanmu dan lanjutkan progres Boss Battle.',
+        repeatInterval: RepeatInterval.daily,
+        notificationDetails: _buildNotifDetails(
           channelId: 'activity_reminder_channel',
           channelName: 'Pengingat Aktivitas Harian',
           body: 'Catat latihanmu dan lanjutkan progres Boss Battle.',
@@ -251,7 +320,8 @@ class NotificationService {
         payload: 'run_screen',
       );
       debugPrint(
-          'Run reminder scheduled ($hour:${minute.toString().padLeft(2, '0')})');
+        'Run reminder scheduled ($hour:${minute.toString().padLeft(2, '0')})',
+      );
     } catch (e) {
       debugPrint('scheduleRunReminder error: $e');
     }
@@ -260,10 +330,9 @@ class NotificationService {
   /// Cancel run reminder and persist OFF state.
   static Future<void> cancelRunReminder() async {
     if (kIsWeb) return;
-    final p = _plugin();
-    if (p == null) return;
+    await _ensureInitialized();
     try {
-      await p.cancel(_kRunNotifId);
+      await _plugin.cancel(id: _kRunNotifId);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kRunEnabled, false);
     } catch (e) {
@@ -276,21 +345,25 @@ class NotificationService {
   // ---------------------------------------------------------------------------
 
   /// Send immediate hydration test notification.
-  /// Returns [NotifPermissionStatus] so the caller can react appropriately.
-  static Future<NotifPermissionStatus> showHydrationReminder() async {
-    if (kIsWeb) return NotifPermissionStatus.unsupported;
-    final p = _plugin();
-    if (p == null) return NotifPermissionStatus.unsupported;
+  /// Tetap mencoba `_plugin.show()` walaupun status `requestPermission()` denied di MIUI.
+  static Future<NotifSendResult> showHydrationReminder() async {
+    if (kIsWeb) {
+      return const NotifSendResult(
+        sent: false,
+        permissionStatus: NotifPermissionStatus.unsupported,
+        errorMessage: 'Platform Web tidak mendukung notifikasi lokal.',
+      );
+    }
 
+    await _ensureInitialized();
     final status = await requestPermission();
-    if (status != NotifPermissionStatus.granted) return status;
 
     try {
-      await p.show(
-        _kHydrationTestId,
-        '💧 Waktunya Minum Air!',
-        'Jaga hidrasi tubuhmu. Minum 1-2 gelas air sekarang.',
-        _buildNotifDetails(
+      await _plugin.show(
+        id: _kHydrationTestId,
+        title: '💧 Waktunya Minum Air!',
+        body: 'Jaga hidrasi tubuhmu. Minum 1-2 gelas air sekarang.',
+        notificationDetails: _buildNotifDetails(
           channelId: 'hydration_channel',
           channelName: 'Pengingat Hidrasi',
           body: 'Jaga hidrasi tubuhmu. Minum 1-2 gelas air sekarang.',
@@ -298,29 +371,40 @@ class NotificationService {
         payload: 'hydration_screen',
       );
       debugPrint('Hydration test notification sent');
-      return NotifPermissionStatus.granted;
+      final finalStatus = await areNotificationsEnabled()
+          ? NotifPermissionStatus.granted
+          : status;
+      return NotifSendResult(sent: true, permissionStatus: finalStatus);
     } catch (e) {
       debugPrint('showHydrationReminder error: $e');
-      return NotifPermissionStatus.denied;
+      return NotifSendResult(
+        sent: false,
+        permissionStatus: status,
+        errorMessage: e.toString(),
+      );
     }
   }
 
   /// Send immediate run test notification.
-  /// Returns [NotifPermissionStatus] so the caller can react appropriately.
-  static Future<NotifPermissionStatus> showRunReminder() async {
-    if (kIsWeb) return NotifPermissionStatus.unsupported;
-    final p = _plugin();
-    if (p == null) return NotifPermissionStatus.unsupported;
+  /// Tetap mencoba `_plugin.show()` walaupun status `requestPermission()` denied di MIUI.
+  static Future<NotifSendResult> showRunReminder() async {
+    if (kIsWeb) {
+      return const NotifSendResult(
+        sent: false,
+        permissionStatus: NotifPermissionStatus.unsupported,
+        errorMessage: 'Platform Web tidak mendukung notifikasi lokal.',
+      );
+    }
 
+    await _ensureInitialized();
     final status = await requestPermission();
-    if (status != NotifPermissionStatus.granted) return status;
 
     try {
-      await p.show(
-        _kRunTestId,
-        '🏋️ Siap Beraktivitas Hari Ini?',
-        'Catat latihanmu dan lanjutkan progres Boss Battle.',
-        _buildNotifDetails(
+      await _plugin.show(
+        id: _kRunTestId,
+        title: '🏋️ Siap Beraktivitas Hari Ini?',
+        body: 'Catat latihanmu dan lanjutkan progres Boss Battle.',
+        notificationDetails: _buildNotifDetails(
           channelId: 'activity_reminder_channel',
           channelName: 'Pengingat Aktivitas Harian',
           body: 'Catat latihanmu dan lanjutkan progres Boss Battle.',
@@ -328,10 +412,17 @@ class NotificationService {
         payload: 'run_screen',
       );
       debugPrint('Run test notification sent');
-      return NotifPermissionStatus.granted;
+      final finalStatus = await areNotificationsEnabled()
+          ? NotifPermissionStatus.granted
+          : status;
+      return NotifSendResult(sent: true, permissionStatus: finalStatus);
     } catch (e) {
       debugPrint('showRunReminder error: $e');
-      return NotifPermissionStatus.denied;
+      return NotifSendResult(
+        sent: false,
+        permissionStatus: status,
+        errorMessage: e.toString(),
+      );
     }
   }
 
@@ -354,11 +445,14 @@ class NotificationService {
     final settings = await loadSettings();
     if (settings['hydration_enabled'] == true) {
       await scheduleHydrationReminder(
-          settings['hydration_interval_hours'] as int);
+        settings['hydration_interval_hours'] as int,
+      );
     }
     if (settings['run_enabled'] == true) {
       await scheduleRunReminder(
-          settings['run_hour'] as int, settings['run_minute'] as int);
+        settings['run_hour'] as int,
+        settings['run_minute'] as int,
+      );
     }
   }
 
@@ -375,7 +469,6 @@ class NotificationService {
       android: AndroidNotificationDetails(
         channelId,
         channelName,
-        // MAX importance + priority → heads-up (popup) notification
         importance: Importance.max,
         priority: Priority.max,
         icon: '@mipmap/ic_launcher',

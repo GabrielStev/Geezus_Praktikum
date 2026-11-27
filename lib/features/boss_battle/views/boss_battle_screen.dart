@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../../../core/services/gym_store.dart';
+import '../../badges/controllers/badge_controller.dart';
 
 class BossBattleScreen extends StatefulWidget {
   const BossBattleScreen({super.key});
@@ -143,11 +144,12 @@ class _BossBattleScreenState extends State<BossBattleScreen>
       final String critText = isCritical ? '💥 CRITICAL OVERLOAD! ' : '';
       _battleLog.insert(
         0,
-        '⚔️ ${critText}Gym Power ($gymDmg) memberikan $damageDealt DMG!',
+        '⚔️ ${critText}Serangan ($totalBaseDmg Base DMG) memberikan $damageDealt DMG!',
       );
     });
 
     if (_bossCurrentHp <= 0) {
+      BadgeController.instance.unlockBossSlayer();
       _endGame(victory: true);
       return;
     }
@@ -250,7 +252,7 @@ class _BossBattleScreenState extends State<BossBattleScreen>
       builder: (context, _) {
         final store = GymStore.instance;
         final gymDmg = store.gymDamage;
-        final totalBaseDmg = gymDmg;
+        final totalBaseDmg = max(10, gymDmg);
 
         return Scaffold(
           backgroundColor: _bgColor,

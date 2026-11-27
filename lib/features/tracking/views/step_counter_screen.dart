@@ -5,7 +5,9 @@ import 'package:sensors_plus/sensors_plus.dart';
 import '../../../core/storage/sqlite_helper.dart';
 
 class StepCounterScreen extends StatefulWidget {
-  const StepCounterScreen({super.key});
+  final bool embedded;
+
+  const StepCounterScreen({super.key, this.embedded = false});
 
   @override
   State<StepCounterScreen> createState() => _StepCounterScreenState();
@@ -172,6 +174,7 @@ class _StepCounterScreenState extends State<StepCounterScreen> {
       ),
     );
 
+    if (!mounted) return;
     if (confirmed == true) {
       setState(() => _stepCount = 0);
       await _persistSteps();
@@ -181,15 +184,20 @@ class _StepCounterScreenState extends State<StepCounterScreen> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
+      const loader = Center(
+        child: CircularProgressIndicator(color: Color(0xFF6C5CE7)),
+      );
+      if (widget.embedded) return loader;
       return const Scaffold(
         backgroundColor: Color(0xFF121212),
-        body: Center(child: CircularProgressIndicator(color: Color(0xFF6C5CE7))),
+        body: loader,
       );
     }
 
-    final double progress = (_stepCount / _dailyGoal).clamp(0.0, 1.0);
-    final double estimatedKm = _stepCount * 0.00075;
-    final int estimatedCalories = (_stepCount * 0.04).round();
+    final content = _buildContent();
+    if (widget.embedded) {
+      return content;
+    }
 
     return Scaffold(
       backgroundColor: _bgColor,
@@ -202,7 +210,16 @@ class _StepCounterScreenState extends State<StepCounterScreen> {
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.white),
       ),
-      body: SafeArea(
+      body: content,
+    );
+  }
+
+  Widget _buildContent() {
+    final double progress = (_stepCount / _dailyGoal).clamp(0.0, 1.0);
+    final double estimatedKm = _stepCount * 0.00075;
+    final int estimatedCalories = (_stepCount * 0.04).round();
+
+    return SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(16.0),
           child: Column(
@@ -405,8 +422,7 @@ class _StepCounterScreenState extends State<StepCounterScreen> {
             ],
           ),
         ),
-      ),
-    );
+      );
   }
 
   Widget _buildSubStat(String label, String value) {
